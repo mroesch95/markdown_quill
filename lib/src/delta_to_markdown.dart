@@ -39,15 +39,13 @@ extension on Object? {
 }
 
 ///
-typedef DeltaToMarkdownVisitLineHandleNewLine = void Function(
-    Style style, StringSink out);
+typedef DeltaToMarkdownVisitLineHandleNewLine = void Function(Style style, StringSink out);
 
 ///
 typedef CustomContentHandler = void Function(QuillText text, StringSink out);
 
 /// Convertor from [Delta] to quill Markdown string.
-class DeltaToMarkdown extends Converter<Delta, String>
-    implements _NodeVisitor<StringSink> {
+class DeltaToMarkdown extends Converter<Delta, String> implements _NodeVisitor<StringSink> {
   ///
   DeltaToMarkdown({
     Map<String, EmbedToMarkdown>? customEmbedHandlers,
@@ -98,8 +96,8 @@ class DeltaToMarkdown extends Converter<Delta, String>
           );
         }
         if (infoString.isEmpty) {
-          final linesWithLang = (node as Block).children.where((child) =>
-              child.containsAttr(CodeBlockLanguageAttribute.attrKey));
+          final linesWithLang =
+              (node as Block).children.where((child) => child.containsAttr(CodeBlockLanguageAttribute.attrKey));
           if (linesWithLang.isNotEmpty) {
             infoString = linesWithLang.first.getAttrValueOr(
               CodeBlockLanguageAttribute.attrKey,
@@ -201,14 +199,77 @@ class DeltaToMarkdown extends Converter<Delta, String>
     ),
     Attribute.link.key: _AttributeHandler(
       beforeContent: (attribute, node, output) {
-        if (node.previous?.containsAttr(attribute.key, attribute.value) !=
-            true) {
+        if (node.previous?.containsAttr(attribute.key, attribute.value) != true) {
           output.write('[');
         }
       },
       afterContent: (attribute, node, output) {
         if (node.next?.containsAttr(attribute.key, attribute.value) != true) {
           output.write('](${attribute.value.asNullable<String>() ?? ''})');
+        }
+      },
+    ),
+    Attribute.color.key: _AttributeHandler(
+      beforeContent: (attribute, node, output) {
+        final color = attribute.value.asNullable<String>();
+        final background = node.getAttrValueOr(Attribute.background.key, null);
+
+        if (color != null || background != null) {
+          final needsSpan = node.previous?.containsAttr(Attribute.color.key, color) != true ||
+              node.previous?.containsAttr(Attribute.background.key, background) != true;
+
+          if (needsSpan) {
+            output.write('<span style="');
+            if (color != null) {
+              output.write('color: $color;');
+            }
+            if (background != null) {
+              if (color != null) output.write(' ');
+              output.write('background-color: $background;');
+            }
+            output.write('">');
+          }
+        }
+      },
+      afterContent: (attribute, node, output) {
+        final color = attribute.value.asNullable<String>();
+        final background = node.getAttrValueOr(Attribute.background.key, null);
+
+        if (color != null || background != null) {
+          final needsSpan = node.next?.containsAttr(Attribute.color.key, color) != true ||
+              node.next?.containsAttr(Attribute.background.key, background) != true;
+
+          if (needsSpan) {
+            output.write('</span>');
+          }
+        }
+      },
+    ),
+    Attribute.background.key: _AttributeHandler(
+      beforeContent: (attribute, node, output) {
+        // Skip if color attribute is present, as it will handle both
+        if (node.containsAttr(Attribute.color.key)) return;
+
+        final background = attribute.value.asNullable<String>();
+        if (background != null) {
+          final needsSpan = node.previous?.containsAttr(Attribute.background.key, background) != true;
+
+          if (needsSpan) {
+            output.write('<span style="background-color: $background;">');
+          }
+        }
+      },
+      afterContent: (attribute, node, output) {
+        // Skip if color attribute is present, as it will handle both
+        if (node.containsAttr(Attribute.color.key)) return;
+
+        final background = attribute.value.asNullable<String>();
+        if (background != null) {
+          final needsSpan = node.next?.containsAttr(Attribute.background.key, background) != true;
+
+          if (needsSpan) {
+            output.write('</span>');
+          }
         }
       },
     ),
@@ -256,12 +317,10 @@ class DeltaToMarkdown extends Converter<Delta, String>
       visitLineHandleNewLine?.call(style, out);
       return out;
     }
-    if (style.isEmpty ||
-        style.values.every((item) => item.scope != AttributeScope.block)) {
+    if (style.isEmpty || style.values.every((item) => item.scope != AttributeScope.block)) {
       out.writeln();
     }
-    if (style.containsKey(Attribute.list.key) &&
-        line.nextLine?.style.containsKey(Attribute.list.key) != true) {
+    if (style.containsKey(Attribute.list.key) && line.nextLine?.style.containsKey(Attribute.list.key) != true) {
       out.writeln();
     }
     out.writeln();
@@ -300,9 +359,7 @@ class DeltaToMarkdown extends Converter<Delta, String>
     VoidCallback contentHandler, {
     bool sortedAttrsBySpan = false,
   }) {
-    final attrs = sortedAttrsBySpan
-        ? node.attrsSortedByLongestSpan()
-        : node.style.attributes.values.toList();
+    final attrs = sortedAttrsBySpan ? node.attrsSortedByLongestSpan() : node.style.attributes.values.toList();
     final handlersToUse = attrs
         .where((attr) => handlers.containsKey(attr.key))
         .map((attr) => MapEntry(attr.key, handlers[attr.key]!))
@@ -332,8 +389,7 @@ class DeltaToMarkdown extends Converter<Delta, String>
     if (!(style.containsKey(Attribute.codeBlock.key) ||
         style.containsKey(Attribute.inlineCode.key) ||
         (text.parent?.style.containsKey(Attribute.codeBlock.key) ?? false))) {
-      content = content.replaceAllMapped(
-          RegExp(r'[\\\`\*\_\{\}\[\]\(\)\#\+\-\.\!\>\<]'), (match) {
+      content = content.replaceAllMapped(RegExp(r'[\\\`\*\_\{\}\[\]\(\)\#\+\-\.\!\>\<]'), (match) {
         return '\\${match[0]}';
       });
     }
@@ -349,8 +405,7 @@ class DeltaToMarkdown extends Converter<Delta, String>
         style.containsKey(Attribute.inlineCode.key) ||
         (text.parent?.style.containsKey(Attribute.codeBlock.key) ?? false))) {
       if (style.attributes.isNotEmpty) {
-        content = content.replaceAllMapped(
-            RegExp(r'[\\\`\*\_\{\}\[\]\(\)\#\+\-\.\!\>\<]'), (match) {
+        content = content.replaceAllMapped(RegExp(r'[\\\`\*\_\{\}\[\]\(\)\#\+\-\.\!\>\<]'), (match) {
           return '\\${match[0]}';
         });
       }
@@ -423,8 +478,7 @@ extension _NodeX on Node {
       node = node.next;
     }
 
-    final attrs = style.attributes.values.sorted(
-        (attr1, attr2) => attrCount[attr2]!.compareTo(attrCount[attr1]!));
+    final attrs = style.attributes.values.sorted((attr1, attr2) => attrCount[attr2]!.compareTo(attrCount[attr1]!));
 
     return attrs;
   }
@@ -466,10 +520,8 @@ String _prefixNumber(Node node, int indentLevel) {
   for (var i = nodeIndex - 1; i >= 0; i--) {
     final nodeBefore = document[i];
 
-    final nodeBeforeIndentLevel =
-        nodeBefore.getAttrValueOr(Attribute.indent.key, 0);
-    final nodeBeforeListType =
-        nodeBefore.getAttrValueOr<String?>(Attribute.list.key, null);
+    final nodeBeforeIndentLevel = nodeBefore.getAttrValueOr(Attribute.indent.key, 0);
+    final nodeBeforeListType = nodeBefore.getAttrValueOr<String?>(Attribute.list.key, null);
     final isOrdered = nodeBeforeListType == 'ordered';
 
     if (nodeBeforeListType == null) {
