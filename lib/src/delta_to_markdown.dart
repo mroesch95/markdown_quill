@@ -211,6 +211,16 @@ class DeltaToMarkdown extends Converter<Delta, String> implements _NodeVisitor<S
     ),
     Attribute.color.key: _AttributeHandler(
       beforeContent: (attribute, node, output) {
+        output.write('<span style="color:${attribute.value};">');
+      },
+      afterContent: (attribute, node, output) {
+        output.write('</span>');
+      },
+    ),
+
+    /*
+    Attribute.color.key: _AttributeHandler(
+      beforeContent: (attribute, node, output) {
         final color = attribute.value.asNullable<String>();
         final background = node.getAttrValueOr(Attribute.background.key, null);
 
@@ -244,7 +254,7 @@ class DeltaToMarkdown extends Converter<Delta, String> implements _NodeVisitor<S
           }
         }
       },
-    ),
+    ),*/
     Attribute.background.key: _AttributeHandler(
       beforeContent: (attribute, node, output) {
         // Skip if color attribute is present, as it will handle both
