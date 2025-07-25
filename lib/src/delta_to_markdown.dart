@@ -1,575 +1,468 @@
-// ignore_for_file: implementation_imports
-
+import 'dart:collection';
 import 'dart:convert';
-import 'dart:ui';
 
 import 'package:collection/collection.dart';
 import 'package:flutter_quill/flutter_quill.dart';
 import 'package:flutter_quill/quill_delta.dart';
+import 'package:markdown/markdown.dart' as md;
 import 'package:markdown_quill/src/custom_quill_attributes.dart';
+import 'package:markdown_quill/src/embeddable_table_syntax.dart';
 import 'package:markdown_quill/src/utils.dart';
 
-class _AttributeHandler {
-  _AttributeHandler({
-    this.beforeContent,
-    this.afterContent,
+/// Converts markdown [md.Element] to list of [Attribute].
+typedef ElementToAttributeConvertor = List<Attribute<dynamic>> Function(
+  md.Element element,
+);
+
+/// Converts markdown [md.Element] to [Embeddable].
+typedef ElementToEmbeddableConvertor = Embeddable Function(
+  Map<String, String> elAttrs,
+);
+
+/// Convertor from Markdown string to quill [Delta].
+class MarkdownToDelta extends Converter<String, Delta> implements md.NodeVisitor {
+  ///
+  MarkdownToDelta({
+    required this.markdownDocument,
+    this.customElementToInlineAttribute = const {},
+    this.customElementToBlockAttribute = const {},
+    this.customElementToEmbeddable = const {},
+    this.softLineBreak = false,
   });
 
-  final void Function(
-    Attribute<Object?> attribute,
-    Node node,
-    StringSink output,
-  )? beforeContent;
+  final md.Document markdownDocument;
+  final Map<String, ElementToAttributeConvertor> customElementToInlineAttribute;
+  final Map<String, ElementToAttributeConvertor> customElementToBlockAttribute;
+  final Map<String, ElementToEmbeddableConvertor> customElementToEmbeddable;
+  final bool softLineBreak;
 
-  final void Function(
-    Attribute<Object?> attribute,
-    Node node,
-    StringSink output,
-  )? afterContent;
-}
+  // final _blockTags = <String>[
+  //   'p',
+  //   'h1',
+  //   'h2',
+  //   'h3',
+  //   'h4',
+  //   'h5',
+  //   'h6',
+  //   'li',
+  //   'blockquote',
+  //   'pre',
+  //   'ol',
+  //   'ul',
+  //   'hr',
+  //   'table',
+  //   'thead',
+  //   'tbody',
+  //   'tr'
+  // ];
 
-/// Outputs [Embed] element as markdown.
-typedef EmbedToMarkdown = void Function(Embed embed, StringSink out);
+  final _elementToBlockAttr = <String, ElementToAttributeConvertor>{
+    'ul': (_) => [Attribute.ul],
+    'ol': (_) => [Attribute.ol],
+    'li': (element) {
+      if (element.attributes['class'] != 'task-list-item') return [];
+      final input = element.children!.first as md.Element;
+      return [if (input.attributes['checked'] == 'true') Attribute.checked else Attribute.unchecked];
+    },
+    'pre': (element) {
+      final codeChild = element.children!.first as md.Element;
+      final language = (codeChild.attributes['class'] ?? '')
+          .split(' ')
+          .where((class_) => class_.startsWith('language-'))
+          .firstOrNull
+          ?.split('-')
+          .lastOrNull;
+      return [
+        Attribute.codeBlock,
+        if (language != null) CodeBlockLanguageAttribute(language),
+      ];
+    },
+    'blockquote': (_) => [Attribute.blockQuote],
+    'h1': (_) => [Attribute.h1],
+    'h2': (_) => [Attribute.h2],
+    'h3': (_) => [Attribute.h3],
+  };
 
-extension on Object? {
-  T? asNullable<T>() {
-    final self = this;
-    return self == null ? null : self as T;
-  }
-}
+  final _elementToInlineAttr = <String, ElementToAttributeConvertor>{
+    'em': (_) => [Attribute.italic],
+    'strong': (_) => [Attribute.bold],
+    'del': (_) => [Attribute.strikeThrough],
+    'a': (element) => [LinkAttribute(element.attributes['href'])],
+    'code': (_) => [Attribute.inlineCode],
+    'span': (element) {
+      final style = element.attributes['style'];
+      if (style == null) return [];
 
-///
-typedef DeltaToMarkdownVisitLineHandleNewLine = void Function(Style style, StringSink out);
+      final attributes = <Attribute<dynamic>>[];
 
-///
-typedef CustomContentHandler = void Function(QuillText text, StringSink out);
-
-/// Convertor from [Delta] to quill Markdown string.
-class DeltaToMarkdown extends Converter<Delta, String> implements _NodeVisitor<StringSink> {
-  ///
-  DeltaToMarkdown({
-    Map<String, EmbedToMarkdown>? customEmbedHandlers,
-    Map<String, CustomAttributeHandler>? customTextAttrsHandlers,
-    this.visitLineHandleNewLine,
-    this.customContentHandler = escapeSpecialCharacters,
-  }) {
-    if (customEmbedHandlers != null) {
-      _embedHandlers.addAll(customEmbedHandlers);
-    }
-
-    if (customTextAttrsHandlers != null) {
-      for (final entry in customTextAttrsHandlers.entries) {
-        _textAttrsHandlers[entry.key] = _AttributeHandler(
-          beforeContent: entry.value.beforeContent,
-          afterContent: entry.value.afterContent,
-        );
+      // Parse color from style
+      final colorMatch = RegExp(r'color:\s*([^;]+)').firstMatch(style);
+      if (colorMatch != null) {
+        final color = colorMatch.group(1)?.trim();
+        if (color != null) {
+          attributes.add(ColorAttribute(color));
+        }
       }
-    }
-  }
 
-  /// allows custom handling of adding new lines to quill Markdown string
-  final DeltaToMarkdownVisitLineHandleNewLine? visitLineHandleNewLine;
-
-  /// allows overriding default behavior of the contentHandler in [_handleAttribute]
-  /// which is responsible for special characters escaping, e.g.: `_` becomes `\_`
-  final CustomContentHandler customContentHandler;
-
-  @override
-  String convert(Delta input) {
-    final newDelta = transform(input);
-
-    final quillDocument = Document.fromDelta(newDelta);
-
-    final outBuffer = quillDocument.root.accept(this);
-
-    return outBuffer.toString();
-  }
-
-  final Map<String, _AttributeHandler> _blockAttrsHandlers = {
-    Attribute.codeBlock.key: _AttributeHandler(
-      beforeContent: (attribute, node, output) {
-        var infoString = '';
-        if (node.containsAttr(CodeBlockLanguageAttribute.attrKey)) {
-          infoString = node.getAttrValueOr(
-            CodeBlockLanguageAttribute.attrKey,
-            '',
-          );
+      // Parse background-color from style
+      final bgColorMatch = RegExp(r'background-color:\s*([^;]+)').firstMatch(style);
+      if (bgColorMatch != null) {
+        final bgColor = bgColorMatch.group(1)?.trim();
+        if (bgColor != null) {
+          attributes.add(BackgroundAttribute(bgColor));
         }
-        if (infoString.isEmpty) {
-          final linesWithLang =
-              (node as Block).children.where((child) => child.containsAttr(CodeBlockLanguageAttribute.attrKey));
-          if (linesWithLang.isNotEmpty) {
-            infoString = linesWithLang.first.getAttrValueOr(
-              CodeBlockLanguageAttribute.attrKey,
-              'or',
-            );
-          }
-        }
+      }
 
-        output.writeln('```$infoString');
-      },
-      afterContent: (attribute, node, output) => output.writeln('```'),
-    ),
-  };
-
-  final Map<String, _AttributeHandler> _lineAttrsHandlers = {
-    Attribute.header.key: _AttributeHandler(
-      beforeContent: (attribute, node, output) {
-        output
-          ..write('#' * (attribute.value.asNullable<int>() ?? 1))
-          ..write(' ');
-      },
-    ),
-    Attribute.blockQuote.key: _AttributeHandler(
-      beforeContent: (attribute, node, output) => output.write('> '),
-    ),
-    Attribute.list.key: _AttributeHandler(
-      beforeContent: (attribute, node, output) {
-        final indentLevel = node.getAttrValueOr(Attribute.indent.key, 0);
-        final isNumbered = attribute.value == 'ordered';
-        final isChecked = attribute.value == 'checked';
-        final isUnchecked = attribute.value == 'unchecked';
-
-        final indent = '    ' * indentLevel;
-        final String prefix;
-        if (isNumbered) {
-          prefix = '${_prefixNumber(node, indentLevel)} ';
-        } else if (isChecked) {
-          prefix = '- [x] ';
-        } else if (isUnchecked) {
-          prefix = '- [ ] ';
-        } else {
-          prefix = '- ';
-        }
-        output
-          ..write(indent)
-          ..write(prefix);
-      },
-    ),
-  };
-
-  final Map<String, _AttributeHandler> _textAttrsHandlers = {
-    Attribute.italic.key: _AttributeHandler(
-      beforeContent: (attribute, node, output) {
-        if (node.previous?.containsAttr(attribute.key) != true) {
-          output.write('_');
-        }
-      },
-      afterContent: (attribute, node, output) {
-        if (node.next?.containsAttr(attribute.key) != true) {
-          output.write('_');
-        }
-      },
-    ),
-    Attribute.bold.key: _AttributeHandler(
-      beforeContent: (attribute, node, output) {
-        if (node.previous?.containsAttr(attribute.key) != true) {
-          output.write('**');
-        }
-      },
-      afterContent: (attribute, node, output) {
-        if (node.next?.containsAttr(attribute.key) != true) {
-          output.write('**');
-        }
-      },
-    ),
-    Attribute.strikeThrough.key: _AttributeHandler(
-      beforeContent: (attribute, node, output) {
-        if (node.previous?.containsAttr(attribute.key) != true) {
-          output.write('~~');
-        }
-      },
-      afterContent: (attribute, node, output) {
-        if (node.next?.containsAttr(attribute.key) != true) {
-          output.write('~~');
-        }
-      },
-    ),
-    Attribute.inlineCode.key: _AttributeHandler(
-      beforeContent: (attribute, node, output) {
-        if (node.previous?.containsAttr(attribute.key) != true) {
-          output.write('`');
-        }
-      },
-      afterContent: (attribute, node, output) {
-        if (node.next?.containsAttr(attribute.key) != true) {
-          output.write('`');
-        }
-      },
-    ),
-    Attribute.link.key: _AttributeHandler(
-      beforeContent: (attribute, node, output) {
-        if (node.previous?.containsAttr(attribute.key, attribute.value) != true) {
-          output.write('[');
-        }
-      },
-      afterContent: (attribute, node, output) {
-        if (node.next?.containsAttr(attribute.key, attribute.value) != true) {
-          output.write('](${attribute.value.asNullable<String>() ?? ''})');
-        }
-      },
-    ),
-    Attribute.color.key: _AttributeHandler(
-      beforeContent: (attribute, node, output) {
-        output.write('<span style="color:${attribute.value};">');
-      },
-      afterContent: (attribute, node, output) {
-        output.write('</span>');
-      },
-    ),
-
-    /*
-    Attribute.color.key: _AttributeHandler(
-      beforeContent: (attribute, node, output) {
-        final color = attribute.value.asNullable<String>();
-        final background = node.getAttrValueOr(Attribute.background.key, null);
-
-        if (color != null || background != null) {
-          final needsSpan = node.previous?.containsAttr(Attribute.color.key, color) != true ||
-              node.previous?.containsAttr(Attribute.background.key, background) != true;
-
-          if (needsSpan) {
-            output.write('<span style="');
-            if (color != null) {
-              output.write('color: $color;');
-            }
-            if (background != null) {
-              if (color != null) output.write(' ');
-              output.write('background-color: $background;');
-            }
-            output.write('">');
-          }
-        }
-      },
-      afterContent: (attribute, node, output) {
-        final color = attribute.value.asNullable<String>();
-        final background = node.getAttrValueOr(Attribute.background.key, null);
-
-        if (color != null || background != null) {
-          final needsSpan = node.next?.containsAttr(Attribute.color.key, color) != true ||
-              node.next?.containsAttr(Attribute.background.key, background) != true;
-
-          if (needsSpan) {
-            output.write('</span>');
-          }
-        }
-      },
-    ),*/
-    Attribute.background.key: _AttributeHandler(
-      beforeContent: (attribute, node, output) {
-        // Skip if color attribute is present, as it will handle both
-        if (node.containsAttr(Attribute.color.key)) return;
-
-        final background = attribute.value.asNullable<String>();
-        if (background != null) {
-          final needsSpan = node.previous?.containsAttr(Attribute.background.key, background) != true;
-
-          if (needsSpan) {
-            output.write('<span style="background-color: $background;">');
-          }
-        }
-      },
-      afterContent: (attribute, node, output) {
-        // Skip if color attribute is present, as it will handle both
-        if (node.containsAttr(Attribute.color.key)) return;
-
-        final background = attribute.value.asNullable<String>();
-        if (background != null) {
-          final needsSpan = node.next?.containsAttr(Attribute.background.key, background) != true;
-
-          if (needsSpan) {
-            output.write('</span>');
-          }
-        }
-      },
-    ),
-  };
-
-  final Map<String, EmbedToMarkdown> _embedHandlers = {
-    BlockEmbed.imageType: (embed, out) => out.write('![](${embed.value.data})'),
-    horizontalRuleType: (embed, out) {
-      // adds new line after it
-      // make --- separated so it doesn't get rendered as header
-      out.writeln('- - -');
+      return attributes;
     },
   };
 
+  final _elementToEmbed = <String, ElementToEmbeddableConvertor>{
+    'hr': (_) => horizontalRule,
+    'img': (elAttrs) => BlockEmbed.image(elAttrs['src'] ?? ''),
+  };
+
+  var _delta = Delta();
+  final _activeInlineAttributes = Queue<List<Attribute<dynamic>>>();
+  final _activeBlockAttributes = Queue<List<Attribute<dynamic>>>();
+  final _topLevelNodes = <md.Node>[];
+  bool _isInBlockQuote = false;
+  bool _isInCodeblock = false;
+  bool _justPreviousBlockExit = false;
+  String? _lastTag;
+  bool _didRemoveTrailingSoftLineBreak = false;
+  String? _currentBlockTag;
+  int _listItemIndent = -1;
+
   @override
-  StringSink visitRoot(Root root, [StringSink? output]) {
-    final out = output ??= StringBuffer();
-    for (final container in root.children) {
-      container.accept(this, out);
+  Delta convert(String input) {
+    _delta = Delta();
+    _activeInlineAttributes.clear();
+    _activeBlockAttributes.clear();
+    _topLevelNodes.clear();
+    _lastTag = null;
+    _currentBlockTag = null;
+    _isInBlockQuote = false;
+    _isInCodeblock = false;
+    _justPreviousBlockExit = false;
+    _listItemIndent = -1;
+
+    final lines = const LineSplitter().convert(input);
+    final mdNodes = markdownDocument.parseLines(lines);
+
+    _topLevelNodes.addAll(mdNodes);
+
+    for (final node in mdNodes) {
+      node.accept(this);
     }
-    return out;
+
+    // Ensure the delta ends with a newline.
+    _appendLastNewLineIfNeeded();
+
+    return _delta;
+  }
+
+  void _appendLastNewLineIfNeeded() {
+    if (_delta.isEmpty) return;
+    final dynamic lastValue = _delta.last.value;
+    if (!(lastValue is String && lastValue.endsWith('\n'))) {
+      _delta.insert('\n', _effectiveBlockAttrs());
+    }
   }
 
   @override
-  StringSink visitBlock(Block block, [StringSink? output]) {
-    final out = output ??= StringBuffer();
-    _handleAttribute(_blockAttrsHandlers, block, output, () {
-      for (final line in block.children) {
-        line.accept(this, out);
+  void visitText(md.Text text) {
+    String renderedText;
+    if (_isInBlockQuote) {
+      renderedText = text.text;
+    } else if (_isInCodeblock) {
+      renderedText = text.text.endsWith('\n') ? text.text.substring(0, text.text.length - 1) : text.text;
+    } else {
+      renderedText = _trimTextToMdSpec(text.text);
+    }
+
+    if (renderedText.contains('\n')) {
+      var lines = renderedText.split('\n');
+      if (renderedText.endsWith('\n')) {
+        lines = lines.sublist(0, lines.length - 1);
+        if (softLineBreak) {
+          _didRemoveTrailingSoftLineBreak = true;
+        }
       }
-    });
-    return out;
-  }
-
-  @override
-  StringSink visitLine(Line line, [StringSink? output]) {
-    final out = output ??= StringBuffer();
-    final style = line.style;
-    _handleAttribute(_lineAttrsHandlers, line, output, () {
-      for (final leaf in line.children) {
-        leaf.accept(this, out);
+      for (var i = 0; i < lines.length; i++) {
+        final isLastItem = i == lines.length - 1;
+        final line = lines[i];
+        _delta.insert(line, _effectiveInlineAttrs());
+        if (!isLastItem) {
+          _delta.insert('\n', _effectiveBlockAttrs());
+        }
       }
-    });
-    if (visitLineHandleNewLine != null) {
-      visitLineHandleNewLine?.call(style, out);
-      return out;
+    } else {
+      _delta.insert(renderedText, _effectiveInlineAttrs());
     }
-    if (style.isEmpty || style.values.every((item) => item.scope != AttributeScope.block)) {
-      out.writeln();
-    }
-    if (style.containsKey(Attribute.list.key) && line.nextLine?.style.containsKey(Attribute.list.key) != true) {
-      out.writeln();
-    }
-    out.writeln();
-    return out;
+    _lastTag = null;
+    _justPreviousBlockExit = false;
   }
 
   @override
-  StringSink visitText(QuillText text, [StringSink? output]) {
-    final out = output ??= StringBuffer();
+  bool visitElementBefore(md.Element element) {
+    _insertNewLineBeforeElementIfNeeded(element);
 
-    _handleAttribute(
-      _textAttrsHandlers,
-      text,
-      output,
-      () => customContentHandler(text, out),
-      sortedAttrsBySpan: true,
-    );
-    return out;
+    _didRemoveTrailingSoftLineBreak = false;
+    final tag = element.tag;
+    _currentBlockTag ??= tag;
+    _lastTag = tag;
+
+    if (_haveBlockAttrs(element)) {
+      _addBlockAttrs(_toBlockAttributes(element));
+    }
+    if (_haveInlineAttrs(element)) {
+      _addInlineAttrs(_toInlineAttributes(element));
+    }
+
+    if (tag == 'blockquote') {
+      _isInBlockQuote = true;
+    }
+
+    if (tag == 'pre') {
+      _isInCodeblock = true;
+    }
+
+    if (tag == 'li') {
+      _listItemIndent++;
+    }
+
+    return true;
   }
 
   @override
-  StringSink visitEmbed(Embed embed, [StringSink? output]) {
-    final out = output ??= StringBuffer();
+  void visitElementAfter(md.Element element) {
+    final tag = element.tag;
 
-    final type = embed.value.type;
+    if (_isEmbedElement(element)) {
+      _delta.insert(_toEmbeddable(element).toJson());
+    }
 
-    _embedHandlers[type]!.call(embed, out);
+    if (tag == 'br') {
+      _delta.insert('\n');
+    }
 
-    return out;
+    // exit block with new line
+    // hr need to be followed by new line
+    _insertNewLineAfterElementIfNeeded(element);
+
+    if (tag == 'blockquote') {
+      _isInBlockQuote = false;
+    }
+
+    if (tag == 'pre') {
+      _isInCodeblock = false;
+    }
+
+    if (tag == 'li') {
+      _listItemIndent--;
+    }
+
+    if (_haveBlockAttrs(element)) {
+      _activeBlockAttributes.removeLast();
+    }
+
+    if (_haveInlineAttrs(element)) {
+      _activeInlineAttributes.removeLast();
+    }
+
+    if (_currentBlockTag == tag) {
+      _currentBlockTag = null;
+    }
+    _lastTag = tag;
   }
 
-  void _handleAttribute(
-    Map<String, _AttributeHandler> handlers,
-    Node node,
-    StringSink output,
-    VoidCallback contentHandler, {
-    bool sortedAttrsBySpan = false,
-  }) {
-    final attrs = sortedAttrsBySpan ? node.attrsSortedByLongestSpan() : node.style.attributes.values.toList();
-    final handlersToUse = attrs
-        .where((attr) => handlers.containsKey(attr.key))
-        .map((attr) => MapEntry(attr.key, handlers[attr.key]!))
-        .toList();
-    for (final handlerEntry in handlersToUse) {
-      handlerEntry.value.beforeContent?.call(
-        node.style.attributes[handlerEntry.key]!,
-        node,
-        output,
+  void _insertNewLine() {
+    _delta.insert('\n', _effectiveBlockAttrs());
+  }
+
+  void _insertNewLineBeforeElementIfNeeded(md.Element element) {
+    if (!_isInBlockQuote && _lastTag == 'blockquote' && element.tag == 'blockquote') {
+      _insertNewLine();
+      return;
+    }
+
+    if (!_isInCodeblock && _lastTag == 'pre' && element.tag == 'pre') {
+      _insertNewLine();
+      return;
+    }
+
+    if (_listItemIndent >= 0 && (element.tag == 'ul' || element.tag == 'ol')) {
+      _insertNewLine();
+      return;
+    }
+
+    if (softLineBreak && _didRemoveTrailingSoftLineBreak && element.tag == 'a') {
+      _insertNewLine();
+      return;
+    }
+  }
+
+  void _insertNewLineAfterElementIfNeeded(md.Element element) {
+    // TODO: refactor this to allow embeds to specify if they require
+    // new line after them
+    if (element.tag == 'hr' || element.tag == EmbeddableTable.tableType) {
+      // Always add new line after divider
+      _justPreviousBlockExit = true;
+      _insertNewLine();
+      return;
+    }
+
+    // if all the p children are embeddable add a new line
+    // example: images in a single line
+    if (element.tag == 'p' &&
+        (element.children?.every(
+              (child) => child is md.Element && _isEmbedElement(child),
+            ) ??
+            false)) {
+      _justPreviousBlockExit = true;
+      _insertNewLine();
+      return;
+    }
+
+    if (!_justPreviousBlockExit && (_isTopLevelNode(element) || _haveBlockAttrs(element) || element.tag == 'li')) {
+      _justPreviousBlockExit = true;
+      _insertNewLine();
+      return;
+    }
+  }
+
+  bool _isTopLevelNode(md.Node node) => _topLevelNodes.contains(node);
+
+  Map<String, dynamic>? _effectiveBlockAttrs() {
+    if (_activeBlockAttributes.isEmpty) return null;
+    final attrsRespectingExclusivity = <Attribute<dynamic>>[
+      if (_listItemIndent > 0) IndentAttribute(level: _listItemIndent),
+    ];
+
+    for (final attr in _activeBlockAttributes.expand((e) => e)) {
+      final isExclusiveAttr = Attribute.exclusiveBlockKeys.contains(
+        attr.key,
       );
-    }
-    contentHandler();
-    for (final handlerEntry in handlersToUse.reversed) {
-      handlerEntry.value.afterContent?.call(
-        node.style.attributes[handlerEntry.key]!,
-        node,
-        output,
+      final isThereAlreadyExclusiveAttr = attrsRespectingExclusivity.any(
+        (element) => Attribute.exclusiveBlockKeys.contains(element.key),
       );
-    }
-  }
+      final canOverrideExclusivity =
+          attrsRespectingExclusivity.map((e) => e.key).contains(Attribute.list.key) && attr.key == Attribute.list.key;
 
-  /// escapes any markdown characters during markdown serialization to avoid
-  /// breaking syntax
-  static void escapeSpecialCharacters(QuillText text, StringSink out) {
-    final style = text.style;
-    var content = text.value;
-    if (!(style.containsKey(Attribute.codeBlock.key) ||
-        style.containsKey(Attribute.inlineCode.key) ||
-        (text.parent?.style.containsKey(Attribute.codeBlock.key) ?? false))) {
-      content = content.replaceAllMapped(RegExp(r'[\\\`\*\_\{\}\[\]\(\)\#\+\-\.\!\>\<]'), (match) {
-        return '\\${match[0]}';
-      });
-    }
-    out.write(content);
-  }
-
-  /// escapes markdown characters during markdown serialization but tries
-  /// to avoid escaping characters when text is not formatted at all
-  static void escapeSpecialCharactersRelaxed(QuillText text, StringSink out) {
-    final style = text.style;
-    var content = text.value;
-    if (!(style.containsKey(Attribute.codeBlock.key) ||
-        style.containsKey(Attribute.inlineCode.key) ||
-        (text.parent?.style.containsKey(Attribute.codeBlock.key) ?? false))) {
-      if (style.attributes.isNotEmpty) {
-        content = content.replaceAllMapped(RegExp(r'[\\\`\*\_\{\}\[\]\(\)\#\+\-\.\!\>\<]'), (match) {
-          return '\\${match[0]}';
-        });
+      if (!isExclusiveAttr || !isThereAlreadyExclusiveAttr || canOverrideExclusivity) {
+        attrsRespectingExclusivity.add(attr);
       }
     }
-    out.write(content);
-  }
-}
 
-//// AST with visitor
-
-abstract class _NodeVisitor<T> {
-  const _NodeVisitor._();
-
-  T visitRoot(Root root, [T? context]);
-
-  T visitBlock(Block block, [T? context]);
-
-  T visitLine(Line line, [T? context]);
-
-  T visitText(QuillText text, [T? context]);
-
-  T visitEmbed(Embed embed, [T? context]);
-}
-
-extension _NodeX on Node {
-  T accept<T>(_NodeVisitor<T> visitor, [T? context]) {
-    switch (runtimeType) {
-      case const (Root):
-        return visitor.visitRoot(this as Root, context);
-      case const (Block):
-        return visitor.visitBlock(this as Block, context);
-      case const (Line):
-        return visitor.visitLine(this as Line, context);
-      case const (QuillText):
-        return visitor.visitText(this as QuillText, context);
-      case Embed:
-        return visitor.visitEmbed(this as Embed, context);
-    }
-    throw Exception('Container of type $runtimeType cannot be visited');
+    return <String, dynamic>{
+      for (final a in attrsRespectingExclusivity) ...a.toJson(),
+    };
   }
 
-  bool containsAttr(String attributeKey, [Object? value]) {
-    if (!style.containsKey(attributeKey)) {
-      return false;
-    }
-    if (value == null) {
-      return true;
-    }
-    return style.attributes[attributeKey]!.value == value;
+  Map<String, dynamic>? _effectiveInlineAttrs() {
+    if (_activeInlineAttributes.isEmpty) return null;
+    return <String, dynamic>{
+      for (final attrs in _activeInlineAttributes)
+        for (final a in attrs) ...a.toJson(),
+    };
   }
 
-  T getAttrValueOr<T>(String attributeKey, T or) {
-    final attrs = style.attributes;
-    final attrValue = attrs[attributeKey]?.value as T?;
-    return attrValue ?? or;
-  }
+  // Define trim text function to remove spaces from text elements in
+  // accordance with Markdown specifications.
+  String _trimTextToMdSpec(String text) {
+    var result = text;
+    // The leading spaces pattern is used to identify spaces
+    // at the beginning of a line of text.
+    final _leadingSpacesPattern = RegExp('^ *');
 
-  List<Attribute<Object?>> attrsSortedByLongestSpan() {
-    final attrCount = <Attribute<dynamic>, int>{};
-    Node? node = this;
-    // get the first node
-    while (node?.previous != null) {
-      node = node?.previous;
+    // The soft line break is used to identify the spaces at the end of a line
+    // of text and the leading spaces in the immediately following the line
+    // of text. These spaces are removed in accordance with the Markdown
+    // specification on soft line breaks when lines of text are joined.
+    final _softLineBreak = RegExp(r' ?\n *');
+
+    // Leading spaces following a hard line break are ignored.
+    // https://github.github.com/gfm/#example-657
+    if (const ['p', 'ol', 'li', 'br'].contains(_lastTag)) {
+      result = result.replaceAll(_leadingSpacesPattern, '');
     }
 
-    while (node != null) {
-      node.style.attributes.forEach((key, value) {
-        attrCount[value] = (attrCount[value] ?? 0) + 1;
-      });
-      node = node.next;
+    if (softLineBreak) {
+      return result;
     }
-
-    final attrs = style.attributes.values.sorted((attr1, attr2) => attrCount[attr2]!.compareTo(attrCount[attr1]!));
-
-    return attrs;
+    return result.replaceAll(_softLineBreak, ' ');
   }
-}
 
-/// public version of [_AttributeHandler]
-class CustomAttributeHandler {
-  ///
-  CustomAttributeHandler({
-    this.beforeContent,
-    this.afterContent,
-  });
-
-  ///
-  final void Function(
-    Attribute<Object?> attribute,
-    Node node,
-    StringSink output,
-  )? beforeContent;
-
-  ///
-  final void Function(
-    Attribute<Object?> attribute,
-    Node node,
-    StringSink output,
-  )? afterContent;
-}
-
-String _prefixNumber(Node node, int indentLevel) {
-  var itemsBeforeAtMyIndentLevel = 0;
-
-  final root = _findRoot(node);
-  if (root == null) {
-    return '1.';
+  Map<String, ElementToAttributeConvertor> _effectiveElementToInlineAttr() {
+    return {
+      ...customElementToInlineAttribute,
+      ..._elementToInlineAttr,
+    };
   }
-  final document = _toDocumentList(root);
-  final nodeIndex = document.indexOf(node);
 
-  for (var i = nodeIndex - 1; i >= 0; i--) {
-    final nodeBefore = document[i];
+  bool _haveInlineAttrs(md.Element element) {
+    if (_isInCodeblock && element.tag == 'code') return false;
+    final exists = _effectiveElementToInlineAttr().containsKey(element.tag);
+    if (!exists) return false;
+    return _effectiveElementToInlineAttr()[element.tag]!(element).isNotEmpty;
+  }
 
-    final nodeBeforeIndentLevel = nodeBefore.getAttrValueOr(Attribute.indent.key, 0);
-    final nodeBeforeListType = nodeBefore.getAttrValueOr<String?>(Attribute.list.key, null);
-    final isOrdered = nodeBeforeListType == 'ordered';
-
-    if (nodeBeforeListType == null) {
-      break;
+  List<Attribute<dynamic>> _toInlineAttributes(md.Element element) {
+    List<Attribute<dynamic>>? result;
+    if (!(_isInCodeblock && element.tag == 'code')) {
+      result = _effectiveElementToInlineAttr()[element.tag]?.call(element);
     }
-    if (nodeBeforeIndentLevel < indentLevel) {
-      break;
+    if (result == null) {
+      throw Exception('Element $element cannot be converted to inline attribute');
     }
-    if (nodeBeforeIndentLevel == indentLevel && isOrdered) {
-      itemsBeforeAtMyIndentLevel++;
+    return result;
+  }
+
+  Map<String, ElementToAttributeConvertor> _effectiveElementToBlockAttr() {
+    return {
+      ...customElementToBlockAttribute,
+      ..._elementToBlockAttr,
+    };
+  }
+
+  void _addInlineAttrs(List<Attribute<dynamic>> attrs) {
+    _activeInlineAttributes.addLast(attrs);
+  }
+
+  void _addBlockAttrs(List<Attribute<dynamic>> attrs) {
+    _activeBlockAttributes.addLast(attrs);
+  }
+
+  bool _haveBlockAttrs(md.Element element) {
+    final exists = _effectiveElementToBlockAttr().containsKey(element.tag);
+    if (!exists) return false;
+    return _effectiveElementToBlockAttr()[element.tag]!(element).isNotEmpty;
+  }
+
+  List<Attribute<dynamic>> _toBlockAttributes(md.Element element) {
+    final result = _effectiveElementToBlockAttr()[element.tag]?.call(element);
+    if (result == null) {
+      throw Exception('Element $element cannot be converted to block attribute');
     }
+    return result;
   }
 
-  return '${itemsBeforeAtMyIndentLevel + 1}.';
-}
-
-List<Node> _toDocumentList(Node node, {List<Node>? input}) {
-  final output = input ?? <Node>[];
-  List<Node>? children;
-  if (node is Root) {
-    children = node.children.toList();
-  } else if (node is Block) {
-    children = node.children.toList();
+  Map<String, ElementToEmbeddableConvertor> _effectiveElementToEmbed() {
+    return {
+      ...customElementToEmbeddable,
+      ..._elementToEmbed,
+    };
   }
 
-  if (children == null || children.isEmpty) {
-    output.add(node);
-  } else {
-    for (final child in children) {
-      _toDocumentList(child, input: output);
+  bool _isEmbedElement(md.Element element) => _effectiveElementToEmbed().containsKey(element.tag);
+
+  Embeddable _toEmbeddable(md.Element element) {
+    final result = _effectiveElementToEmbed()[element.tag]?.call(element.attributes);
+
+    if (result == null) {
+      throw Exception('Element $element cannot be converted to Embeddable');
     }
+    return result;
   }
-  return output;
-}
-
-Root? _findRoot(Node? parent) {
-  if (parent is Root || parent == null) {
-    return parent as Root?;
-  }
-  return _findRoot(parent.parent);
 }
