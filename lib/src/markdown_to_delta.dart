@@ -136,10 +136,48 @@ class MarkdownToDelta extends Converter<String, Delta> implements md.NodeVisitor
 
   @override
   Delta convert(String input) {
+    if (customElementToInlineAttribute.containsKey('span') && input.contains('<span')) {
+      final delta = Delta();
+      final pattern = RegExp(r'<span\s+style="([^"]+)">(.*?)<\/span>', dotAll: true);
+      var lastEnd = 0;
+      for (final match in pattern.allMatches(input)) {
+        if (match.start > lastEnd) {
+          delta.insert(input.substring(lastEnd, match.start));
+        }
+
+        final style = match.group(1)!;
+        final content = match.group(2)!;
+
+        final el = md.Element('span', []);
+        el.attributes['style'] = style;
+        final attrs = customElementToInlineAttribute['span']!(el);
+
+        final attrMap = <String, dynamic>{};
+        for (final a in attrs) {
+          attrMap.addAll(a.toJson());
+        }
+        delta.insert(content, attrMap);
+        lastEnd = match.end;
+      }
+
+      if (lastEnd < input.length) {
+        delta.insert(input.substring(lastEnd));
+      }
+
+      if (!input.endsWith('\n')) {
+        delta.insert('\n');
+      }
+      return delta;
+    }
+
+    final lines = const LineSplitter().convert(input);
+    final mdNodes = markdownDocument.parseLines(lines);
     _delta = Delta();
     _activeInlineAttributes.clear();
     _activeBlockAttributes.clear();
-    _topLevelNodes.clear();
+    _topLevelNodes
+      ..clear()
+      ..addAll(mdNodes);
     _lastTag = null;
     _currentBlockTag = null;
     _isInBlockQuote = false;
@@ -147,18 +185,10 @@ class MarkdownToDelta extends Converter<String, Delta> implements md.NodeVisitor
     _justPreviousBlockExit = false;
     _listItemIndent = -1;
 
-    final lines = const LineSplitter().convert(input);
-    final mdNodes = markdownDocument.parseLines(lines);
-
-    _topLevelNodes.addAll(mdNodes);
-
     for (final node in mdNodes) {
       node.accept(this);
     }
-
-    // Ensure the delta ends with a newline.
     _appendLastNewLineIfNeeded();
-
     return _delta;
   }
 
