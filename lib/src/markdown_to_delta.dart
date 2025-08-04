@@ -134,6 +134,80 @@ class MarkdownToDelta extends Converter<String, Delta> implements md.NodeVisitor
   String? _currentBlockTag;
   int _listItemIndent = -1;
 
+  String deltaToCombinedMarkdown(Delta delta) {
+    final buffer = StringBuffer();
+
+    for (final op in delta.toList()) {
+      final value = op.value;
+      if (value is String) {
+        final attrs = op.attributes ?? <String, dynamic>{};
+
+        // Farben/Hintergrund zuerst: wrap in span(s)
+        String opening = '';
+        String closing = '';
+
+        if (attrs.containsKey(Attribute.color.key)) {
+          final c = attrs[Attribute.color.key];
+          opening += '<span style="color:$c;">';
+          closing = '</span>' + closing;
+        }
+        if (attrs.containsKey(Attribute.background.key)) {
+          final b = attrs[Attribute.background.key];
+          opening += '<span style="background-color:$b;">';
+          closing = '</span>' + closing;
+        }
+
+        // Text formatting: bold+italic, underline, strike
+        String innerOpen = '';
+        String innerClose = '';
+
+        // Bold + Italic -> ***
+        final hasBold = attrs.containsKey(Attribute.bold.key);
+        final hasItalic = attrs.containsKey(Attribute.italic.key);
+        final hasUnderline = attrs.containsKey(Attribute.underline.key);
+        final hasStrike = attrs.containsKey(Attribute.strikeThrough.key);
+
+        if (hasBold && hasItalic) {
+          innerOpen += '***';
+          innerClose = '***' + innerClose;
+        } else if (hasBold) {
+          innerOpen += '**';
+          innerClose = '**' + innerClose;
+        } else if (hasItalic) {
+          innerOpen += '_';
+          innerClose = '_' + innerClose;
+        }
+
+        if (hasUnderline) {
+          innerOpen += '<u>';
+          innerClose = '</u>' + innerClose;
+        }
+
+        if (hasStrike) {
+          innerOpen += '~~';
+          innerClose = '~~' + innerClose;
+        }
+
+        // Compose order: outer spans, then formatting, then content, then close formatting and spans.
+        buffer.write(opening);
+        buffer.write(innerOpen);
+        buffer.write(value);
+        buffer.write(innerClose);
+        buffer.write(closing);
+      } else if (value is Map) {
+        // embed (e.g., image, hr) fallback to json or special handling
+        buffer.write(jsonEncode(value));
+      }
+    }
+
+    // Ensure ending newline
+    final result = buffer.toString();
+    if (!result.endsWith('\n')) {
+      return '$result\n';
+    }
+    return result;
+  }
+
   @override
   Delta convert(String input) {
     input = _preprocessExtendedFormatting(input);
@@ -164,22 +238,7 @@ class MarkdownToDelta extends Converter<String, Delta> implements md.NodeVisitor
   }
 
   String _preprocessExtendedFormatting(String s) {
-    /// ***<span style="...">text</span>***
-    s = s.replaceAllMapped(
-      RegExp(r'\*\*\*(<span\s+style="[^"]+">[\s\S]*?<\/span>)\*\*\*'),
-      (m) {
-        final inner = m.group(1)!;
-        final styleMatch = RegExp(r'<span\s+style="([^"]+)">([\s\S]*?)<\/span>').firstMatch(inner);
-        if (styleMatch != null) {
-          final style = styleMatch.group(1)!;
-          final content = styleMatch.group(2)!;
-          return '<span style="$style"><strong><em>$content</em></strong></span>';
-        }
-        return m.group(0)!;
-      },
-    );
-
-    /// <span style="...">***text***</span>
+    // 1. *** (bold+italic) innerhalb eines span: <span style="...">***text***</span>
     s = s.replaceAllMapped(
       RegExp(r'<span\s+style="([^"]+)">\*\*\*([\s\S]*?)\*\*\*<\/span>'),
       (m) {
@@ -189,88 +248,17 @@ class MarkdownToDelta extends Converter<String, Delta> implements md.NodeVisitor
       },
     );
 
+    // 2. span um ***text***: ***<span style="...">text</span>***
     s = s.replaceAllMapped(
-      RegExp(r'\*\*\*(<span\s+style="[^"]+">[\s\S]*?<\/span>)\*\*\*'),
+      RegExp(r'\*\*\*(<span\s+style="([^"]+)">([\s\S]*?)<\/span>)\*\*\*'),
       (m) {
-        final inner = m.group(1)!;
-        final styleMatch = RegExp(r'<span\s+style="([^"]+)">([\s\S]*?)<\/span>').firstMatch(inner);
-        if (styleMatch != null) {
-          final style = styleMatch.group(1)!;
-          final content = styleMatch.group(2)!;
-          return '<span style="$style"><strong><em>$content</em></strong></span>';
-        }
-        return m.group(0)!;
-      },
-    );
-
-    s = s.replaceAllMapped(
-      RegExp(r'\*\*(<span\s+style="[^"]+">[\s\S]*?<\/span>)\*\*'),
-      (m) {
-        final inner = m.group(1)!;
-        final styleMatch = RegExp(r'<span\s+style="([^"]+)">([\s\S]*?)<\/span>').firstMatch(inner);
-        if (styleMatch != null) {
-          final style = styleMatch.group(1)!;
-          final content = styleMatch.group(2)!;
-          return '<span style="$style"><strong>$content</strong></span>';
-        }
-        return m.group(0)!;
-      },
-    );
-
-    s = s.replaceAllMapped(
-      RegExp(r'\*(<span\s+style="[^"]+">[\s\S]*?<\/span>)\*'),
-      (m) {
-        final inner = m.group(1)!;
-        final styleMatch = RegExp(r'<span\s+style="([^"]+)">([\s\S]*?)<\/span>').firstMatch(inner);
-        if (styleMatch != null) {
-          final style = styleMatch.group(1)!;
-          final content = styleMatch.group(2)!;
-          return '<span style="$style"><em>$content</em></span>';
-        }
-        return m.group(0)!;
-      },
-    );
-
-    s = s.replaceAllMapped(
-      RegExp(r'__(<span\s+style="[^"]+">[\s\S]*?<\/span>)__'),
-      (m) {
-        final inner = m.group(1)!;
-        final styleMatch = RegExp(r'<span\s+style="([^"]+)">([\s\S]*?)<\/span>').firstMatch(inner);
-        if (styleMatch != null) {
-          final style = styleMatch.group(1)!;
-          final content = styleMatch.group(2)!;
-          return '<span style="$style"><u>$content</u></span>';
-        }
-        return m.group(0)!;
-      },
-    );
-
-    // === strikethrough around span ===
-    s = s.replaceAllMapped(
-      RegExp(r'~~(<span\s+style="[^"]+">[\s\S]*?<\/span>)~~'),
-      (m) {
-        final inner = m.group(1)!;
-        final styleMatch = RegExp(r'<span\s+style="([^"]+)">([\s\S]*?)<\/span>').firstMatch(inner);
-        if (styleMatch != null) {
-          final style = styleMatch.group(1)!;
-          final content = styleMatch.group(2)!;
-          return '<span style="$style"><del>$content</del></span>';
-        }
-        return m.group(0)!;
-      },
-    );
-
-    // === span wrapping triple markers: <span style="...">***text***</span> ===
-    s = s.replaceAllMapped(
-      RegExp(r'<span\s+style="([^"]+)">\*\*\*([\s\S]*?)\*\*\*<\/span>'),
-      (m) {
-        final style = m.group(1)!;
-        final inner = m.group(2)!;
+        final style = m.group(2)!;
+        final inner = m.group(3)!;
         return '<span style="$style"><strong><em>$inner</em></strong></span>';
       },
     );
 
-    // === span wrapping bold ===
+    // 3. ** (bold) innerhalb span
     s = s.replaceAllMapped(
       RegExp(r'<span\s+style="([^"]+)">\*\*([\s\S]*?)\*\*<\/span>'),
       (m) {
@@ -280,7 +268,17 @@ class MarkdownToDelta extends Converter<String, Delta> implements md.NodeVisitor
       },
     );
 
-    // === span wrapping italic (*) ===
+    // 4. span um **text**
+    s = s.replaceAllMapped(
+      RegExp(r'\*\*(<span\s+style="([^"]+)">([\s\S]*?)<\/span>)\*\*'),
+      (m) {
+        final style = m.group(2)!;
+        final inner = m.group(3)!;
+        return '<span style="$style"><strong>$inner</strong></span>';
+      },
+    );
+
+    // 5. * (italic) innerhalb span
     s = s.replaceAllMapped(
       RegExp(r'<span\s+style="([^"]+)">\*([\s\S]*?)\*<\/span>'),
       (m) {
@@ -290,7 +288,17 @@ class MarkdownToDelta extends Converter<String, Delta> implements md.NodeVisitor
       },
     );
 
-    // === span wrapping underline (__) ===
+    // 6. span um *text*
+    s = s.replaceAllMapped(
+      RegExp(r'\*(<span\s+style="([^"]+)">([\s\S]*?)<\/span>)\*'),
+      (m) {
+        final style = m.group(2)!;
+        final inner = m.group(3)!;
+        return '<span style="$style"><em>$inner</em></span>';
+      },
+    );
+
+    // 7. __ (underline) innerhalb span
     s = s.replaceAllMapped(
       RegExp(r'<span\s+style="([^"]+)">__([\s\S]*?)__<\/span>'),
       (m) {
@@ -300,13 +308,71 @@ class MarkdownToDelta extends Converter<String, Delta> implements md.NodeVisitor
       },
     );
 
-    // === span wrapping strikethrough ===
+    // 8. span um __text__
+    s = s.replaceAllMapped(
+      RegExp(r'__(<span\s+style="([^"]+)">([\s\S]*?)<\/span>)__'),
+      (m) {
+        final style = m.group(2)!;
+        final inner = m.group(3)!;
+        return '<span style="$style"><u>$inner</u></span>';
+      },
+    );
+
+    // 9. ~~ (strike) innerhalb span
     s = s.replaceAllMapped(
       RegExp(r'<span\s+style="([^"]+)">~~([\s\S]*?)~~<\/span>'),
       (m) {
         final style = m.group(1)!;
         final inner = m.group(2)!;
         return '<span style="$style"><del>$inner</del></span>';
+      },
+    );
+
+    // 10. span um ~~text~~
+    s = s.replaceAllMapped(
+      RegExp(r'~~(<span\s+style="([^"]+)">([\s\S]*?)<\/span>)~~'),
+      (m) {
+        final style = m.group(2)!;
+        final inner = m.group(3)!;
+        return '<span style="$style"><del>$inner</del></span>';
+      },
+    );
+
+    // 11. Kombinationen: underline inside bold+italic in span: <span style="..."><u>***text***</u></span>
+    s = s.replaceAllMapped(
+      RegExp(r'<span\s+style="([^"]+)"><u>\*\*\*([\s\S]*?)\*\*\*<\/u><\/span>'),
+      (m) {
+        final style = m.group(1)!;
+        final inner = m.group(2)!;
+        return '<span style="$style"><u><strong><em>$inner</em></strong></u></span>';
+      },
+    );
+
+    // 12. bold+italic around underline: ***<u>text</u>***
+    s = s.replaceAllMapped(
+      RegExp(r'\*\*\*<u>([\s\S]*?)<\/u>\*\*\*'),
+      (m) {
+        final inner = m.group(1)!;
+        return '<u><strong><em>$inner</em></strong></u>';
+      },
+    );
+
+    // 13. strike + bold+italic: ~~***text***~~ → <del><strong><em>text</em></strong></del>
+    s = s.replaceAllMapped(
+      RegExp(r'~~\*\*\*([\s\S]*?)\*\*\*~~'),
+      (m) {
+        final inner = m.group(1)!;
+        return '<del><strong><em>$inner</em></strong></del>';
+      },
+    );
+
+    // 14. bold+italic inside strike span etc. (verschachtelt): <span style="...">~~***text***~~</span>
+    s = s.replaceAllMapped(
+      RegExp(r'<span\s+style="([^"]+)">~~\*\*\*([\s\S]*?)\*\*\*~~<\/span>'),
+      (m) {
+        final style = m.group(1)!;
+        final inner = m.group(2)!;
+        return '<span style="$style"><del><strong><em>$inner</em></strong></del></span>';
       },
     );
 
