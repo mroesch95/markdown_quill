@@ -134,84 +134,8 @@ class MarkdownToDelta extends Converter<String, Delta> implements md.NodeVisitor
   String? _currentBlockTag;
   int _listItemIndent = -1;
 
-  String deltaToCombinedMarkdown(Delta delta) {
-    final buffer = StringBuffer();
-
-    for (final op in delta.toList()) {
-      final value = op.value;
-      if (value is String) {
-        final attrs = op.attributes ?? <String, dynamic>{};
-
-        // Farben/Hintergrund zuerst: wrap in span(s)
-        String opening = '';
-        String closing = '';
-
-        if (attrs.containsKey(Attribute.color.key)) {
-          final c = attrs[Attribute.color.key];
-          opening += '<span style="color:$c;">';
-          closing = '</span>' + closing;
-        }
-        if (attrs.containsKey(Attribute.background.key)) {
-          final b = attrs[Attribute.background.key];
-          opening += '<span style="background-color:$b;">';
-          closing = '</span>' + closing;
-        }
-
-        // Text formatting: bold+italic, underline, strike
-        String innerOpen = '';
-        String innerClose = '';
-
-        // Bold + Italic -> ***
-        final hasBold = attrs.containsKey(Attribute.bold.key);
-        final hasItalic = attrs.containsKey(Attribute.italic.key);
-        final hasUnderline = attrs.containsKey(Attribute.underline.key);
-        final hasStrike = attrs.containsKey(Attribute.strikeThrough.key);
-
-        if (hasBold && hasItalic) {
-          innerOpen += '***';
-          innerClose = '***' + innerClose;
-        } else if (hasBold) {
-          innerOpen += '**';
-          innerClose = '**' + innerClose;
-        } else if (hasItalic) {
-          innerOpen += '_';
-          innerClose = '_' + innerClose;
-        }
-
-        if (hasUnderline) {
-          innerOpen += '<u>';
-          innerClose = '</u>' + innerClose;
-        }
-
-        if (hasStrike) {
-          innerOpen += '~~';
-          innerClose = '~~' + innerClose;
-        }
-
-        // Compose order: outer spans, then formatting, then content, then close formatting and spans.
-        buffer.write(opening);
-        buffer.write(innerOpen);
-        buffer.write(value);
-        buffer.write(innerClose);
-        buffer.write(closing);
-      } else if (value is Map) {
-        // embed (e.g., image, hr) fallback to json or special handling
-        buffer.write(jsonEncode(value));
-      }
-    }
-
-    // Ensure ending newline
-    final result = buffer.toString();
-    if (!result.endsWith('\n')) {
-      return '$result\n';
-    }
-    return result;
-  }
-
   @override
   Delta convert(String input) {
-    input = _preprocessExtendedFormatting(input);
-
     _delta = Delta();
     _activeInlineAttributes.clear();
     _activeBlockAttributes.clear();
@@ -232,109 +156,10 @@ class MarkdownToDelta extends Converter<String, Delta> implements md.NodeVisitor
       node.accept(this);
     }
 
+    // Ensure the delta ends with a newline.
     _appendLastNewLineIfNeeded();
 
     return _delta;
-  }
-
-  String _preprocessExtendedFormatting(String s) {
-    // ***<span style="...">text</span>*** → <span style="...">**_text_**</span>
-    s = s.replaceAllMapped(
-      RegExp(r'\*\*\*(<span\s+style="([^"]+)">([\s\S]*?)<\/span>)\*\*\*'),
-      (m) {
-        final style = m.group(2)!;
-        final inner = m.group(3)!;
-        return '<span style="$style">**_{$inner}_**</span>';
-      },
-    );
-
-    // **<span style="...">text</span>** → <span style="...">**text**</span>
-    s = s.replaceAllMapped(
-      RegExp(r'\*\*(<span\s+style="([^"]+)">([\s\S]*?)<\/span>)\*\*'),
-      (m) {
-        final style = m.group(2)!;
-        final inner = m.group(3)!;
-        return '<span style="$style">**$inner**</span>';
-      },
-    );
-
-    // *<span style="...">text</span>* → <span style="...">*text*</span>
-    s = s.replaceAllMapped(
-      RegExp(r'\*(<span\s+style="([^"]+)">([\s\S]*?)<\/span>)\*'),
-      (m) {
-        final style = m.group(2)!;
-        final inner = m.group(3)!;
-        return '<span style="$style">*$inner*</span>';
-      },
-    );
-
-    // __<span style="...">text</span>__ → <span style="...">__text__</span>
-    s = s.replaceAllMapped(
-      RegExp(r'__(<span\s+style="([^"]+)">([\s\S]*?)<\/span>)__'),
-      (m) {
-        final style = m.group(2)!;
-        final inner = m.group(3)!;
-        return '<span style="$style">__${inner}__</span>';
-      },
-    );
-
-    // ~~<span style="...">text</span>~~ → <span style="...">~~text~~</span>
-    s = s.replaceAllMapped(
-      RegExp(r'~~(<span\s+style="([^"]+)">([\s\S]*?)<\/span>)~~'),
-      (m) {
-        final style = m.group(2)!;
-        final inner = m.group(3)!;
-        return '<span style="$style">~~$inner~~</span>';
-      },
-    );
-
-    // Umgekehrte Richtung: <span style="...">**_text_**</span> bleibt so, aber <span style="...">***text***</span> → **_text_**
-    s = s.replaceAllMapped(
-      RegExp(r'<span\s+style="([^"]+)">\*\*\*([\s\S]*?)\*\*\*<\/span>'),
-      (m) {
-        final style = m.group(1)!;
-        final inner = m.group(2)!;
-        return '<span style="$style">**_${inner}_**</span>';
-      },
-    );
-
-    s = s.replaceAllMapped(
-      RegExp(r'<span\s+style="([^"]+)">\*\*([\s\S]*?)\*\*<\/span>'),
-      (m) {
-        final style = m.group(1)!;
-        final inner = m.group(2)!;
-        return '<span style="$style">**$inner**</span>';
-      },
-    );
-
-    s = s.replaceAllMapped(
-      RegExp(r'<span\s+style="([^"]+)">\*([\s\S]*?)\*<\/span>'),
-      (m) {
-        final style = m.group(1)!;
-        final inner = m.group(2)!;
-        return '<span style="$style">*$inner*</span>';
-      },
-    );
-
-    s = s.replaceAllMapped(
-      RegExp(r'<span\s+style="([^"]+)">__([\s\S]*?)__<\/span>'),
-      (m) {
-        final style = m.group(1)!;
-        final inner = m.group(2)!;
-        return '<span style="$style">__${inner}__</span>';
-      },
-    );
-
-    s = s.replaceAllMapped(
-      RegExp(r'<span\s+style="([^"]+)">~~([\s\S]*?)~~<\/span>'),
-      (m) {
-        final style = m.group(1)!;
-        final inner = m.group(2)!;
-        return '<span style="$style">~~$inner~~</span>';
-      },
-    );
-
-    return s;
   }
 
   void _appendLastNewLineIfNeeded() {
