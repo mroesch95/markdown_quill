@@ -376,6 +376,7 @@ class MarkdownToDelta extends Converter<String, Delta> implements md.NodeVisitor
       },
     );
 
+    // Weitere Kombinationen können analog ergänzt werden: z.B. bold+underline, italic+strike etc.
     return s;
   }
 
