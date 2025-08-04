@@ -238,145 +238,102 @@ class MarkdownToDelta extends Converter<String, Delta> implements md.NodeVisitor
   }
 
   String _preprocessExtendedFormatting(String s) {
-    // 1. *** (bold+italic) innerhalb eines span: <span style="...">***text***</span>
-    s = s.replaceAllMapped(
-      RegExp(r'<span\s+style="([^"]+)">\*\*\*([\s\S]*?)\*\*\*<\/span>'),
-      (m) {
-        final style = m.group(1)!;
-        final inner = m.group(2)!;
-        return '<span style="$style"><strong><em>$inner</em></strong></span>';
-      },
-    );
-
-    // 2. span um ***text***: ***<span style="...">text</span>***
+    // ***<span style="...">text</span>*** → <span style="...">**_text_**</span>
     s = s.replaceAllMapped(
       RegExp(r'\*\*\*(<span\s+style="([^"]+)">([\s\S]*?)<\/span>)\*\*\*'),
       (m) {
         final style = m.group(2)!;
         final inner = m.group(3)!;
-        return '<span style="$style"><strong><em>$inner</em></strong></span>';
+        return '<span style="$style">**_{$inner}_**</span>';
       },
     );
 
-    // 3. ** (bold) innerhalb span
-    s = s.replaceAllMapped(
-      RegExp(r'<span\s+style="([^"]+)">\*\*([\s\S]*?)\*\*<\/span>'),
-      (m) {
-        final style = m.group(1)!;
-        final inner = m.group(2)!;
-        return '<span style="$style"><strong>$inner</strong></span>';
-      },
-    );
-
-    // 4. span um **text**
+    // **<span style="...">text</span>** → <span style="...">**text**</span>
     s = s.replaceAllMapped(
       RegExp(r'\*\*(<span\s+style="([^"]+)">([\s\S]*?)<\/span>)\*\*'),
       (m) {
         final style = m.group(2)!;
         final inner = m.group(3)!;
-        return '<span style="$style"><strong>$inner</strong></span>';
+        return '<span style="$style">**$inner**</span>';
       },
     );
 
-    // 5. * (italic) innerhalb span
-    s = s.replaceAllMapped(
-      RegExp(r'<span\s+style="([^"]+)">\*([\s\S]*?)\*<\/span>'),
-      (m) {
-        final style = m.group(1)!;
-        final inner = m.group(2)!;
-        return '<span style="$style"><em>$inner</em></span>';
-      },
-    );
-
-    // 6. span um *text*
+    // *<span style="...">text</span>* → <span style="...">*text*</span>
     s = s.replaceAllMapped(
       RegExp(r'\*(<span\s+style="([^"]+)">([\s\S]*?)<\/span>)\*'),
       (m) {
         final style = m.group(2)!;
         final inner = m.group(3)!;
-        return '<span style="$style"><em>$inner</em></span>';
+        return '<span style="$style">*$inner*</span>';
       },
     );
 
-    // 7. __ (underline) innerhalb span
-    s = s.replaceAllMapped(
-      RegExp(r'<span\s+style="([^"]+)">__([\s\S]*?)__<\/span>'),
-      (m) {
-        final style = m.group(1)!;
-        final inner = m.group(2)!;
-        return '<span style="$style"><u>$inner</u></span>';
-      },
-    );
-
-    // 8. span um __text__
+    // __<span style="...">text</span>__ → <span style="...">__text__</span>
     s = s.replaceAllMapped(
       RegExp(r'__(<span\s+style="([^"]+)">([\s\S]*?)<\/span>)__'),
       (m) {
         final style = m.group(2)!;
         final inner = m.group(3)!;
-        return '<span style="$style"><u>$inner</u></span>';
+        return '<span style="$style">__${inner}__</span>';
       },
     );
 
-    // 9. ~~ (strike) innerhalb span
-    s = s.replaceAllMapped(
-      RegExp(r'<span\s+style="([^"]+)">~~([\s\S]*?)~~<\/span>'),
-      (m) {
-        final style = m.group(1)!;
-        final inner = m.group(2)!;
-        return '<span style="$style"><del>$inner</del></span>';
-      },
-    );
-
-    // 10. span um ~~text~~
+    // ~~<span style="...">text</span>~~ → <span style="...">~~text~~</span>
     s = s.replaceAllMapped(
       RegExp(r'~~(<span\s+style="([^"]+)">([\s\S]*?)<\/span>)~~'),
       (m) {
         final style = m.group(2)!;
         final inner = m.group(3)!;
-        return '<span style="$style"><del>$inner</del></span>';
+        return '<span style="$style">~~$inner~~</span>';
       },
     );
 
-    // 11. Kombinationen: underline inside bold+italic in span: <span style="..."><u>***text***</u></span>
+    // Umgekehrte Richtung: <span style="...">**_text_**</span> bleibt so, aber <span style="...">***text***</span> → **_text_**
     s = s.replaceAllMapped(
-      RegExp(r'<span\s+style="([^"]+)"><u>\*\*\*([\s\S]*?)\*\*\*<\/u><\/span>'),
+      RegExp(r'<span\s+style="([^"]+)">\*\*\*([\s\S]*?)\*\*\*<\/span>'),
       (m) {
         final style = m.group(1)!;
         final inner = m.group(2)!;
-        return '<span style="$style"><u><strong><em>$inner</em></strong></u></span>';
+        return '<span style="$style">**_${inner}_**</span>';
       },
     );
 
-    // 12. bold+italic around underline: ***<u>text</u>***
     s = s.replaceAllMapped(
-      RegExp(r'\*\*\*<u>([\s\S]*?)<\/u>\*\*\*'),
-      (m) {
-        final inner = m.group(1)!;
-        return '<u><strong><em>$inner</em></strong></u>';
-      },
-    );
-
-    // 13. strike + bold+italic: ~~***text***~~ → <del><strong><em>text</em></strong></del>
-    s = s.replaceAllMapped(
-      RegExp(r'~~\*\*\*([\s\S]*?)\*\*\*~~'),
-      (m) {
-        final inner = m.group(1)!;
-        return '<del><strong><em>$inner</em></strong></del>';
-      },
-    );
-
-    // 14. bold+italic inside strike span etc. (verschachtelt): <span style="...">~~***text***~~</span>
-    s = s.replaceAllMapped(
-      RegExp(r'<span\s+style="([^"]+)">~~\*\*\*([\s\S]*?)\*\*\*~~<\/span>'),
+      RegExp(r'<span\s+style="([^"]+)">\*\*([\s\S]*?)\*\*<\/span>'),
       (m) {
         final style = m.group(1)!;
         final inner = m.group(2)!;
-        return '<span style="$style"><del><strong><em>$inner</em></strong></del></span>';
+        return '<span style="$style">**$inner**</span>';
       },
     );
 
-    // Weitere Kombinationen können analog ergänzt werden: z.B. bold+underline, italic+strike etc.
+    s = s.replaceAllMapped(
+      RegExp(r'<span\s+style="([^"]+)">\*([\s\S]*?)\*<\/span>'),
+      (m) {
+        final style = m.group(1)!;
+        final inner = m.group(2)!;
+        return '<span style="$style">*$inner*</span>';
+      },
+    );
+
+    s = s.replaceAllMapped(
+      RegExp(r'<span\s+style="([^"]+)">__([\s\S]*?)__<\/span>'),
+      (m) {
+        final style = m.group(1)!;
+        final inner = m.group(2)!;
+        return '<span style="$style">__${inner}__</span>';
+      },
+    );
+
+    s = s.replaceAllMapped(
+      RegExp(r'<span\s+style="([^"]+)">~~([\s\S]*?)~~<\/span>'),
+      (m) {
+        final style = m.group(1)!;
+        final inner = m.group(2)!;
+        return '<span style="$style">~~$inner~~</span>';
+      },
+    );
+
     return s;
   }
 
