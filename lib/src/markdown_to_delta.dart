@@ -164,6 +164,31 @@ class MarkdownToDelta extends Converter<String, Delta> implements md.NodeVisitor
   }
 
   String _preprocessExtendedFormatting(String s) {
+    /// ***<span style="...">text</span>***
+    s = s.replaceAllMapped(
+      RegExp(r'\*\*\*(<span\s+style="[^"]+">[\s\S]*?<\/span>)\*\*\*'),
+      (m) {
+        final inner = m.group(1)!;
+        final styleMatch = RegExp(r'<span\s+style="([^"]+)">([\s\S]*?)<\/span>').firstMatch(inner);
+        if (styleMatch != null) {
+          final style = styleMatch.group(1)!;
+          final content = styleMatch.group(2)!;
+          return '<span style="$style"><strong><em>$content</em></strong></span>';
+        }
+        return m.group(0)!;
+      },
+    );
+
+    /// <span style="...">***text***</span>
+    s = s.replaceAllMapped(
+      RegExp(r'<span\s+style="([^"]+)">\*\*\*([\s\S]*?)\*\*\*<\/span>'),
+      (m) {
+        final style = m.group(1)!;
+        final inner = m.group(2)!;
+        return '<span style="$style"><strong><em>$inner</em></strong></span>';
+      },
+    );
+
     s = s.replaceAllMapped(
       RegExp(r'\*\*\*(<span\s+style="[^"]+">[\s\S]*?<\/span>)\*\*\*'),
       (m) {
